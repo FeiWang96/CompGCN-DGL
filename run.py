@@ -4,10 +4,11 @@ from pprint import pprint
 import numpy as np
 import random
 from pathlib import Path
-import torch
-from torch.utils.data import DataLoader
 import dgl
 from dgl.contrib.data import load_data
+import torch
+from torch.utils.data import DataLoader
+from tqdm import tqdm
 
 from model import CompGCN_DistMult, CompGCN_ConvE
 from utils import process, TrainDataset, TestDataset
@@ -31,7 +32,7 @@ class Runner(object):
             self.device = torch.device('cpu')
         self.p.embed_dim = self.p.k_w * self.p.k_h if self.p.embed_dim is None else self.p.embed_dim  # output dim of gnn
         self.data_iter = self.get_data_iter()
-        self.g = self.build_graph()
+        self.g = self.build_graph().to(self.device)
         self.edge_type, self.edge_norm = self.get_edge_dir_and_norm()
         self.model = self.get_model()
         self.optimizer = torch.optim.Adam(self.model.parameters(), lr=self.p.lr, weight_decay=self.p.l2)
@@ -48,6 +49,7 @@ class Runner(object):
             self.load_model(save_path)
             print('Successfully Loaded previous model')
 
+        patience = 0
         for epoch in range(self.p.max_epochs):
             start_time = time.time()
             train_loss = self.train()
@@ -57,14 +59,16 @@ class Runner(object):
                 self.best_val_mrr = val_results['mrr']
                 self.best_epoch = epoch
                 self.save_model(save_path)
-            print(
-                f"[Epoch {epoch}]: Training Loss: {train_loss:.5}, Valid MRR: {val_results['mrr']:.5}, Best Valid MRR: {self.best_val_mrr:.5}, Cost: {time.time() - start_time:.2f}s")
+            else:
+                patience += 1
+            print(f"[Epoch {epoch}]: Training Loss: {train_loss:.5}, Valid MRR: {val_results['mrr']:.5}, Best Valid MRR: {self.best_val_mrr:.5}, Cost: {time.time() - start_time:.2f}s")
+            if patience >= self.p.early_stopping:
+                break
         pprint(vars(self.p))
         self.load_model(save_path)
         print(f'Loading best model in {self.best_epoch} epoch, Evaluating on Test data')
         test_results = self.evaluate('test')
-        print(
-            f"MRR: Tail {test_results['left_mrr']:.5}, Head {test_results['right_mrr']:.5}, Avg {test_results['mrr']:.5}")
+        print(f"MRR: Tail {test_results['left_mrr']:.5}, Head {test_results['right_mrr']:.5}, Avg {test_results['mrr']:.5}")
         print(f"MR: Tail {test_results['left_mr']:.5}, Head {test_results['right_mr']:.5}, Avg {test_results['mr']:.5}")
         print(f"hits@1 = {test_results['hits@1']:.5}")
         print(f"hits@3 = {test_results['hits@3']:.5}")
@@ -74,7 +78,7 @@ class Runner(object):
         self.model.train()
         losses = []
         train_iter = self.data_iter['train']
-        for step, (triplets, labels) in enumerate(train_iter):
+        for step, (triplets, labels) in tqdm(enumerate(train_iter), total=len(train_iter)):
             triplets, labels = triplets.to(self.device), labels.to(self.device)
             subj, rel = triplets[:, 0], triplets[:, 1]
             pred = self.model(self.g, subj, rel)  # [batch_size, num_ent]
@@ -216,9 +220,9 @@ class Runner(object):
         """
         :return: edge_type: indicates type of each edge: [E]
         """
-        in_deg = self.g.in_degrees(range(self.g.number_of_nodes())).float().numpy()
+        in_deg = self.g.in_degrees(range(self.g.number_of_nodes())).float()
         norm = in_deg ** -0.5
-        norm[np.isinf(norm)] = 0
+        norm[torch.isinf(norm)] = 0
         self.g.ndata['xxx'] = norm
         self.g.apply_edges(lambda edges: {'xxx': edges.dst['xxx'] * edges.src['xxx']})
         norm = self.g.edata.pop('xxx').squeeze().to(self.device)
@@ -258,8 +262,9 @@ if __name__ == '__main__':
     parser.add_argument('--opn', dest='opn', default='corr', help='Composition Operation to be used in CompGCN')
 
     parser.add_argument('--batch', dest='batch_size', default=256, type=int, help='Batch size')
-    parser.add_argument('--gpu', type=int, default=0, help='Set GPU Ids : Eg: For CPU = -1, For Single GPU = 0')
+    parser.add_argument('--gpu', type=int, default=1, help='Set GPU Ids : Eg: For CPU = -1, For Single GPU = 0')
     parser.add_argument('--epoch', dest='max_epochs', type=int, default=500, help='Number of epochs')
+    parser.add_argument('--early_stopping', dest='early_stopping', type=int, default=10, help='early stopping')
     parser.add_argument('--l2', type=float, default=0.0, help='L2 Regularization for Optimizer')
     parser.add_argument('--lr', type=float, default=0.001, help='Starting Learning Rate')
     parser.add_argument('--lbl_smooth', dest='lbl_smooth', type=float, default=0.1, help='Label Smoothing')
@@ -301,6 +306,7 @@ if __name__ == '__main__':
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
     torch.cuda.manual_seed(args.seed)
+    torch.backends.cudnn.deterministic = True
 
     runner = Runner(args)
     runner.fit()

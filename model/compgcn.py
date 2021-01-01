@@ -1,8 +1,9 @@
+import dgl
 import torch
 from torch import nn
-import dgl
-from model.layer import CompGCNCov
 import torch.nn.functional as F
+
+from model.layer import CompGCNCov
 
 
 class CompGCN(nn.Module):
